@@ -3877,13 +3877,15 @@ async function cmdDashboard(args: string[]): Promise<void> {
 // ─── Session helpers ──────────────────────────────────────────────────────────
 
 interface AdoptedFromData {
-  source?: 'tmux' | 'herdr' | 'zellij';
+  source?: 'tmux' | 'herdr' | 'zellij' | 'orca';
   tmuxTarget?: string;
   zellijSession?: string;
   zellijPaneId?: string;
   herdrSessionName?: string;
   herdrTarget?: string;
   herdrPaneId?: string;
+  orcaTerminalHandle?: string;
+  orcaTerminalTitle?: string;
   originalCliPid?: number;
   sessionId?: string;
   cwd?: string;
@@ -4647,6 +4649,9 @@ function adoptedCliPid(s: SessionData): number | undefined {
 function adoptTargetLabel(s: SessionData): string {
   if (!isAdoptedSession(s)) return '';
   const a = s.adoptedFrom;
+  if (a.source === 'orca' || a.orcaTerminalHandle) {
+    return `adopt: orca ${a.orcaTerminalTitle || a.orcaTerminalHandle || '?'}`;
+  }
   if (a.source === 'zellij' || a.zellijPaneId) {
     const target = a.zellijSession && a.zellijPaneId
       ? `${a.zellijSession}/${a.zellijPaneId}`
@@ -4749,8 +4754,8 @@ function sessionBackingInfo(s: SessionData, snapshot?: BackingProbeSnapshot): {
   if (s.backendType === 'pty') {
     return { backendType: 'pty', probe: 'missing', label: 'pty' };
   }
-  if (s.backendType === 'riff' || s.backendType === 'mojo' || s.backendType === 'remote-runner') {
-    // A remote backend runs its agent off-box, not in a local
+  if (s.backendType === 'riff' || s.backendType === 'mojo' || s.backendType === 'remote-runner' || s.backendType === 'orca') {
+    // A remote backend or adopted Orca terminal runs outside a Botmux-owned local
     // multiplexer pane: there is nothing to probe, attach to, or name as a
     // PersistentBackendTarget (sessionPersistentTarget returns undefined for it, by
     // design). Surface a stable label and report the nonexistent local backing as
@@ -4761,7 +4766,11 @@ function sessionBackingInfo(s: SessionData, snapshot?: BackingProbeSnapshot): {
     // narrow the union, and the exhaustiveness guard at the end of this function
     // depends on that narrowing. Adding a remote backend therefore fails to
     // compile here until it is listed — which is how mojo was caught.
-    return { backendType: s.backendType, probe: 'missing', label: s.backendType };
+    return {
+      backendType: s.backendType,
+      probe: 'missing',
+      label: s.backendType === 'orca' ? adoptTargetLabel(s) : s.backendType,
+    };
   }
   if (s.backendType === undefined) {
     // Legacy rows predate backend stamping. Only tmux was externally attachable,
