@@ -4,6 +4,7 @@ const state = vi.hoisted(() => ({
   asyncCall: vi.fn(),
   syncCall: vi.fn(),
   roots: vi.fn(async () => new Map()),
+  daemon: vi.fn(async () => new Map()),
   readdir: vi.fn(() => [] as string[]),
   readFile: vi.fn(),
   readlink: vi.fn(),
@@ -19,6 +20,10 @@ vi.mock('../src/services/orca-relay.js', () => ({
   queryOrcaRelayPtyMetadata: state.roots,
 }));
 
+vi.mock('../src/services/orca-daemon.js', () => ({
+  queryOrcaDaemonSessions: state.daemon,
+}));
+
 vi.mock('node:fs', async (importOriginal) => {
   const original = await importOriginal<typeof import('node:fs')>();
   return {
@@ -30,6 +35,7 @@ vi.mock('node:fs', async (importOriginal) => {
 });
 import {
   cliIdFromOrcaAgentIdentity,
+  discoverAdoptableOrcaSessionByHandle,
   discoverAdoptableOrcaSessions,
   validateOrcaAdoptTarget,
 } from '../src/core/orca-adopt-discovery.js';
@@ -48,12 +54,31 @@ const terminal = {
   title: 'Fix login flow',
 };
 
+const serverTerminal = {
+  ...terminal,
+  ptyId: 'serve-3687641d',
+  executionHostId: 'local',
+};
+
+type OrcaCallResult = { ok: boolean; value?: unknown; kind?: string; message?: string };
+
+/** Instance-aware CLI mock: the relay list is served unless a server list is
+ * pinned, mirroring a machine where only one Orca installation answers. */
+function mockOrcaLists(lists: { relay?: OrcaCallResult; server?: OrcaCallResult } = {}): void {
+  state.asyncCall.mockImplementation(async (_args: string[], instance?: string) => {
+    if (instance === 'server') return lists.server ?? { ok: false, kind: 'unavailable', message: 'no orcad' };
+    return lists.relay ?? { ok: false, kind: 'unavailable', message: 'no relay shim' };
+  });
+}
+
 describe('Orca adopt discovery', () => {
   beforeEach(() => {
     state.asyncCall.mockReset();
     state.syncCall.mockReset();
     state.roots.mockClear();
     state.roots.mockResolvedValue(new Map());
+    state.daemon.mockReset();
+    state.daemon.mockResolvedValue(new Map());
     state.readdir.mockReturnValue([]);
     state.readFile.mockReset();
     state.readlink.mockReset();
@@ -65,23 +90,21 @@ describe('Orca adopt discovery', () => {
   });
 
   it('returns only connected writable terminals for the bot CLI', async () => {
-    state.asyncCall.mockResolvedValue({
-      ok: true,
-      value: {
-        terminals: [
-          terminal,
-          { ...terminal, handle: 'term_codex', agentIdentity: 'codex' },
-          { ...terminal, handle: 'term_readonly', writable: false },
-        ],
-      },
-    });
+    mockOrcaLists({ relay: { ok: true, value: {
+      terminals: [
+        terminal,
+        { ...terminal, handle: 'term_codex', agentIdentity: 'codex' },
+        { ...terminal, handle: 'term_readonly', writable: false },
+      ],
+    } } });
     const candidates = await discoverAdoptableOrcaSessions('traex');
     expect(candidates.map(item => item.orcaTerminalHandle)).toEqual(['term_1']);
     expect(candidates[0]?.orcaTerminalTitle).toBe('Fix login flow');
+    expect(candidates[0]?.orcaInstance).toBe('relay');
   });
 
   it('binds transcripts only to a CLI below the relay-attested PTY root', async () => {
-    state.asyncCall.mockResolvedValue({ ok: true, value: { terminals: [terminal] } });
+    mockOrcaLists({ relay: { ok: true, value: { terminals: [terminal] } } });
     state.roots.mockResolvedValue(new Map([['pty:1', { pid: 100, cols: 104, rows: 50 }]]));
     state.readdir.mockReturnValue(['100', '101', '102', '999']);
     state.readFile.mockImplementation((path: string, encoding?: string) => {
@@ -105,11 +128,78 @@ describe('Orca adopt discovery', () => {
     expect(candidate?.paneSizeVerified).toBe(true);
   });
 
-  it('binds a Claude session from the relay-attested CLI pid, not cwd uniqueness', async () => {
-    state.asyncCall.mockResolvedValue({
-      ok: true,
-      value: { terminals: [{ ...terminal, agentIdentity: 'claude' }] },
+  it('binds server-terminal transcripts and geometry through the terminal daemon', async () => {
+    mockOrcaLists({ server: { ok: true, value: { terminals: [serverTerminal] } } });
+    state.daemon.mockResolvedValue(new Map([['term_1', { pid: 100, cols: 120, rows: 40 }]]));
+    state.readdir.mockReturnValue(['100', '101']);
+    state.readFile.mockImplementation((path: string, encoding?: string) => {
+      if (path.endsWith('/status')) {
+        const pid = Number(path.split('/')[2]);
+        return `Name:\tt\nPPid:\t${pid === 101 ? 100 : 1}\n`;
+      }
+      if (path.endsWith('/environ')) {
+        return Buffer.from(path.includes('/101/') ? 'ORCA_TERMINAL_HANDLE=term_1\0' : '');
+      }
+      if (path.endsWith('/comm')) return encoding ? 'traecli\n' : Buffer.from('traecli\n');
+      throw new Error(`unexpected read ${path}`);
     });
+    state.readlink.mockReturnValue('/usr/bin/traecli');
+
+    const [candidate] = await discoverAdoptableOrcaSessions('traex');
+    expect(candidate).toMatchObject({
+      orcaInstance: 'server',
+      orcaPtyId: 'serve-3687641d',
+      cliPid: 101,
+      paneCols: 120,
+      paneRows: 40,
+      paneSizeVerified: true,
+    });
+    expect(state.roots).not.toHaveBeenCalled();
+  });
+
+  it('merges relay and server instances and tags each candidate with its instance', async () => {
+    mockOrcaLists({
+      relay: { ok: true, value: { terminals: [terminal] } },
+      server: { ok: true, value: { terminals: [{ ...serverTerminal, handle: 'term_srv' }] } },
+    });
+    const candidates = await discoverAdoptableOrcaSessions('traex');
+    expect(candidates.map(item => [item.orcaTerminalHandle, item.orcaInstance]))
+      .toEqual([['term_1', 'relay'], ['term_srv', 'server']]);
+  });
+
+  it('keeps the server entry when both instances report the same handle', async () => {
+    mockOrcaLists({
+      relay: { ok: true, value: { terminals: [terminal] } },
+      server: { ok: true, value: { terminals: [serverTerminal] } },
+    });
+    state.daemon.mockResolvedValue(new Map([['term_1', { pid: 100, cols: 120, rows: 40 }]]));
+    const candidates = await discoverAdoptableOrcaSessions('traex');
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({ orcaInstance: 'server', paneSizeVerified: true });
+  });
+
+  it('resolves a handle through whichever instance owns the terminal', async () => {
+    state.asyncCall.mockImplementation(async (_args: string[], instance?: string) => (
+      instance === 'server'
+        ? { ok: true, value: { terminal: serverTerminal } }
+        : { ok: false, kind: 'missing', message: 'terminal_not_found' }
+    ));
+    expect(await discoverAdoptableOrcaSessionByHandle('term_1', 'traex'))
+      .toMatchObject({ orcaInstance: 'server', orcaTerminalHandle: 'term_1' });
+
+    state.asyncCall.mockImplementation(async (_args: string[], instance?: string) => (
+      instance === 'server'
+        ? { ok: false, kind: 'missing', message: 'terminal_not_found' }
+        : { ok: true, value: { terminal } }
+    ));
+    expect(await discoverAdoptableOrcaSessionByHandle('term_1', 'traex'))
+      .toMatchObject({ orcaInstance: 'relay', orcaTerminalHandle: 'term_1' });
+  });
+
+  it('binds a Claude session from the relay-attested CLI pid, not cwd uniqueness', async () => {
+    mockOrcaLists({ relay: { ok: true, value: {
+      terminals: [{ ...terminal, agentIdentity: 'claude' }],
+    } } });
     state.roots.mockResolvedValue(new Map([['pty:1', { pid: 100, cols: 90, rows: 40 }]]));
     state.readdir.mockReturnValue(['100', '101']);
     state.readFile.mockImplementation((path: string, encoding?: string) => {
@@ -131,10 +221,9 @@ describe('Orca adopt discovery', () => {
   });
 
   it('rejects terminals with neither an incarnation nor a PTY identity', async () => {
-    state.asyncCall.mockResolvedValue({
-      ok: true,
-      value: { terminals: [{ ...terminal, ptyId: null, incarnationId: null }] },
-    });
+    mockOrcaLists({ relay: { ok: true, value: {
+      terminals: [{ ...terminal, ptyId: null, incarnationId: null }],
+    } } });
     expect(await discoverAdoptableOrcaSessions('traex')).toEqual([]);
   });
 
@@ -167,6 +256,37 @@ describe('Orca adopt discovery', () => {
     })).toBe('missing');
   });
 
+  it('routes liveness validation through the instance that owns the terminal', () => {
+    state.syncCall.mockReturnValue({ ok: true, value: { terminal: serverTerminal } });
+    expect(validateOrcaAdoptTarget({
+      orcaTerminalHandle: 'term_1',
+      orcaPtyId: 'serve-3687641d',
+      orcaIncarnationId: 'inc_1',
+      orcaExecutionHostId: 'local',
+      orcaWorktreeId: 'repo::/work',
+      orcaAgentIdentity: 'trae',
+      orcaInstance: 'server',
+    })).toBe('alive');
+    expect(state.syncCall).toHaveBeenLastCalledWith(
+      ['terminal', 'show', '--terminal', 'term_1'], 'server',
+    );
+
+    state.syncCall.mockClear();
+    state.syncCall.mockReturnValue({ ok: true, value: { terminal } });
+    expect(validateOrcaAdoptTarget({
+      orcaTerminalHandle: 'term_1',
+      orcaPtyId: 'ssh:h@@pty:1',
+      orcaIncarnationId: 'inc_1',
+      orcaExecutionHostId: 'ssh:h',
+      orcaWorktreeId: 'repo::/work',
+      orcaAgentIdentity: 'trae',
+      orcaInstance: 'relay',
+    })).toBe('alive');
+    expect(state.syncCall).toHaveBeenLastCalledWith(
+      ['terminal', 'show', '--terminal', 'term_1'], 'relay',
+    );
+  });
+
   it('fails closed when restoring legacy Orca metadata without a stable identity', () => {
     const legacyTarget = {
       orcaTerminalHandle: 'term_1',
@@ -175,6 +295,10 @@ describe('Orca adopt discovery', () => {
     };
     state.syncCall.mockReturnValue({ ok: true, value: { terminal } });
     expect(validateOrcaAdoptTarget(legacyTarget)).toBe('missing');
+    // Legacy rows have no instance field; they must stay relay-routed.
+    expect(state.syncCall).toHaveBeenLastCalledWith(
+      ['terminal', 'show', '--terminal', 'term_1'], 'relay',
+    );
 
     state.syncCall.mockReturnValue({ ok: true, value: { terminal: { ...terminal, ptyId: 'ssh:h@@pty:2', incarnationId: 'inc_2' } } });
     expect(validateAdoptTargetState({

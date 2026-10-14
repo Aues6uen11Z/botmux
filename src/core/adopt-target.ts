@@ -18,6 +18,7 @@ export function adoptedFromForTarget(
   if (isOrcaAdoptTarget(target)) {
     return {
       source: 'orca',
+      orcaInstance: target.orcaInstance,
       orcaTerminalHandle: target.orcaTerminalHandle,
       orcaTerminalTitle: target.orcaTerminalTitle,
       orcaPtyId: target.orcaPtyId,

@@ -4,6 +4,7 @@ const api = vi.hoisted(() => ({
   asyncCall: vi.fn(),
   syncCall: vi.fn(),
   relayMetadata: vi.fn(async () => new Map()),
+  daemonSessions: vi.fn(async () => new Map()),
 }));
 
 vi.mock('../src/services/orca-cli.js', async (importOriginal) => ({
@@ -14,6 +15,10 @@ vi.mock('../src/services/orca-cli.js', async (importOriginal) => ({
 
 vi.mock('../src/services/orca-relay.js', () => ({
   queryOrcaRelayPtyMetadata: api.relayMetadata,
+}));
+
+vi.mock('../src/services/orca-daemon.js', () => ({
+  queryOrcaDaemonSessions: api.daemonSessions,
 }));
 
 import { OrcaBackend, renderOrcaTranscriptHistory } from '../src/adapters/backend/orca-backend.js';
@@ -47,6 +52,8 @@ describe('OrcaBackend', () => {
     api.syncCall.mockReset();
     api.relayMetadata.mockReset();
     api.relayMetadata.mockResolvedValue(new Map());
+    api.daemonSessions.mockReset();
+    api.daemonSessions.mockResolvedValue(new Map());
   });
 
   it('publishes changed screen frames without resizing the source terminal', async () => {
@@ -113,7 +120,7 @@ describe('OrcaBackend', () => {
     expect(backend.sendSpecialKeys('Enter')).toBe(true);
     expect(api.syncCall).toHaveBeenLastCalledWith([
       'terminal', 'send', '--terminal', 'term_1', '--text', 'hello、world', '--enter',
-    ], 15_000);
+    ], 'relay', 15_000);
   });
 
   it('uses bracketed paste only for a backend whose CLI requires it', () => {
@@ -125,7 +132,7 @@ describe('OrcaBackend', () => {
     backend.sendSpecialKeys('Enter');
     expect(api.syncCall).toHaveBeenLastCalledWith([
       'terminal', 'send', '--terminal', 'term_1', '--text', '\x1b[200~hello、world\x1b[201~', '--enter',
-    ], 15_000);
+    ], 'relay', 15_000);
   });
 
   it('throws on rejected input so adapters do not retry an uncertain Enter', () => {
@@ -201,7 +208,7 @@ describe('OrcaBackend', () => {
     await vi.waitFor(() => expect(api.asyncCall).toHaveBeenCalledTimes(2));
     expect(api.asyncCall).toHaveBeenLastCalledWith([
       'terminal', 'send', '--terminal', 'term_1', '--text', 'abc',
-    ], 15_000);
+    ], 'relay', 15_000);
     backend.kill();
   });
 
@@ -251,6 +258,29 @@ describe('OrcaBackend', () => {
     await vi.waitFor(() => expect(sizes).toEqual([{ cols: 104, rows: 50 }]));
     expect(backend.getPaneSize()).toEqual({ cols: 104, rows: 50 });
     expect(backend.hasAuthoritativePaneSize()).toBe(true);
+    backend.kill();
+  });
+
+  it('refreshes server-terminal geometry through the terminal daemon by handle', async () => {
+    api.asyncCall.mockImplementation(async (_args: string[], instance?: string) => (
+      instance === 'server'
+        ? { ok: true, value: { terminal: { status: 'running', source: 'screen', tail: [] } } }
+        : { ok: false, kind: 'unavailable', message: 'no relay shim' }
+    ));
+    api.daemonSessions.mockResolvedValue(new Map([['term_1', { pid: 1, cols: 120, rows: 40 }]]));
+    const backend = new OrcaBackend(identity({
+      instance: 'server',
+      ptyId: 'serve-3687641d',
+      executionHostId: 'local',
+    }));
+    const sizes: Array<{ cols: number; rows: number }> = [];
+    backend.onPaneSizeChange(size => sizes.push(size));
+    backend.spawn('', [], { cwd: '/w', cols: 80, rows: 24, env: {} });
+    await vi.waitFor(() => expect(sizes).toEqual([{ cols: 120, rows: 40 }]));
+    expect(backend.getPaneSize()).toEqual({ cols: 120, rows: 40 });
+    expect(backend.hasAuthoritativePaneSize()).toBe(true);
+    expect(api.relayMetadata).not.toHaveBeenCalled();
+    expect(api.asyncCall.mock.calls.every(call => call[1] === 'server')).toBe(true);
     backend.kill();
   });
 

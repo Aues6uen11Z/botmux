@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const child = vi.hoisted(() => ({
@@ -18,6 +18,7 @@ import {
   callOrcaSync,
   hasStableOrcaTerminalIdentity,
   matchesOrcaTerminalIdentity,
+  resolveOrcaServerBinary,
 } from '../src/services/orca-cli.js';
 
 describe('Orca CLI envelope', () => {
@@ -41,6 +42,34 @@ describe('Orca CLI envelope', () => {
     } finally {
       vi.unstubAllEnvs();
       rmSync(join(homedir(), '.orca-relay'), { recursive: true, force: true });
+    }
+  });
+
+  it('routes calls to the server CLI installation and keeps relay as the default', () => {
+    const base = mkdtempSync(join(tmpdir(), 'botmux-orca-bins-'));
+    const serverDir = join(base, 'server');
+    const relayDir = join(base, 'relay');
+    mkdirSync(serverDir, { recursive: true });
+    mkdirSync(relayDir, { recursive: true });
+    const serverCli = join(serverDir, 'orca');
+    const relayCli = join(relayDir, 'orca');
+    writeFileSync(serverCli, '#!/bin/sh\n');
+    writeFileSync(relayCli, '#!/bin/sh\n');
+    chmodSync(serverCli, 0o700);
+    chmodSync(relayCli, 0o700);
+    vi.stubEnv('ORCA_SERVER_CLI_BIN_DIR', serverDir);
+    vi.stubEnv('ORCA_REMOTE_CLI_BIN_DIR', relayDir);
+    child.sync.mockReturnValue(JSON.stringify({ ok: true, result: {} }));
+
+    try {
+      expect(resolveOrcaServerBinary()).toBe(serverCli);
+      callOrcaSync(['terminal', 'list'], 'server');
+      expect(child.sync.mock.calls[0]?.[0]).toBe(serverCli);
+      callOrcaSync(['terminal', 'list']);
+      expect(child.sync.mock.calls[1]?.[0]).toBe(relayCli);
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(base, { recursive: true, force: true });
     }
   });
 
@@ -93,6 +122,8 @@ describe('Orca CLI envelope', () => {
     };
     expect(hasStableOrcaTerminalIdentity({ ptyId: null, incarnationId: null })).toBe(false);
     expect(matchesOrcaTerminalIdentity(terminal, expected)).toBe(true);
+    // The instance is botmux routing state, not Orca identity.
+    expect(matchesOrcaTerminalIdentity(terminal, { ...expected, instance: 'server' })).toBe(true);
     expect(matchesOrcaTerminalIdentity({ ...terminal, worktreeId: 'repo::/other' }, expected)).toBe(false);
     expect(matchesOrcaTerminalIdentity({ ...terminal, agentIdentity: 'codex' }, expected)).toBe(false);
   });
