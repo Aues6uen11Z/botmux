@@ -6,6 +6,10 @@ import { isExecutable } from '../utils/executable.js';
 const ORCA_TIMEOUT_MS = 8_000;
 const ORCA_MAX_BUFFER = 16 * 1024 * 1024;
 
+/** Which Orca installation drives this terminal: the SSH-relay shim (desktop
+ * runtime reachable over the relay) or the local server (orcad) CLI. */
+export type OrcaInstance = 'relay' | 'server';
+
 export interface OrcaTerminalIdentity {
   handle: string;
   ptyId?: string | null;
@@ -24,6 +28,10 @@ export interface OrcaExpectedTerminalIdentity {
   executionHostId?: string;
   worktreeId: string;
   agentIdentity: string;
+  /** Botmux routing hint for which CLI installation owns this terminal.
+   * Deliberately NOT compared by matchesOrcaTerminalIdentity: it is botmux
+   * state, not Orca identity. Absent = 'relay' (pre-server rows). */
+  instance?: OrcaInstance;
 }
 
 export function hasStableOrcaTerminalIdentity(
@@ -68,6 +76,23 @@ export function resolveOrcaBinary(): string {
   return 'orca';
 }
 
+/** Server (orcad) CLI. No PATH fallback: bare `orca` may be the relay shim,
+ * so either instance could win depending on the machine's setup. */
+export function resolveOrcaServerBinary(): string | undefined {
+  const candidates = [
+    process.env.ORCA_SERVER_CLI_BIN_DIR && join(process.env.ORCA_SERVER_CLI_BIN_DIR, 'orca'),
+    join(homedir(), '.orca', 'cli', 'bin', 'orca'),
+  ];
+  for (const candidate of candidates) {
+    if (candidate && isExecutable(candidate)) return candidate;
+  }
+  return undefined;
+}
+
+function binaryForInstance(instance: OrcaInstance): string | undefined {
+  return instance === 'server' ? resolveOrcaServerBinary() : resolveOrcaBinary();
+}
+
 function classifyFailure(message: string): OrcaCallResult<never> {
   const normalized = message.toLowerCase();
   if (
@@ -108,10 +133,13 @@ function commandArgs(args: readonly string[]): string[] {
 
 export function callOrcaSync<T>(
   args: readonly string[],
+  instance: OrcaInstance = 'relay',
   timeoutMs = ORCA_TIMEOUT_MS,
 ): OrcaCallResult<T> {
+  const bin = binaryForInstance(instance);
+  if (!bin) return { ok: false, kind: 'unavailable', message: 'Orca server CLI not found' };
   try {
-    const stdout = execFileSync(resolveOrcaBinary(), commandArgs(args), {
+    const stdout = execFileSync(bin, commandArgs(args), {
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: timeoutMs,
@@ -128,10 +156,13 @@ export function callOrcaSync<T>(
 
 export function callOrca<T>(
   args: readonly string[],
+  instance: OrcaInstance = 'relay',
   timeoutMs = ORCA_TIMEOUT_MS,
 ): Promise<OrcaCallResult<T>> {
   return new Promise((resolve) => {
-    execFile(resolveOrcaBinary(), commandArgs(args), {
+    const bin = binaryForInstance(instance);
+    if (!bin) return resolve({ ok: false, kind: 'unavailable', message: 'Orca server CLI not found' });
+    execFile(bin, commandArgs(args), {
       encoding: 'utf-8',
       timeout: timeoutMs,
       maxBuffer: ORCA_MAX_BUFFER,

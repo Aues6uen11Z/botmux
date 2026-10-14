@@ -124,10 +124,11 @@ describe('buildAdoptSelectCard (V2 picker)', () => {
   it('shows an Orca terminal title as Target while keeping its handle internal', () => {
     const card = parse(buildAdoptSelectCard([{
       source: 'orca',
+      orcaInstance: 'server',
       orcaTerminalHandle: 'term_ea5b26db-18f8-4f88-a7f9-4af1fbe9c02f',
-      orcaPtyId: 'ssh:h@@pty:1',
+      orcaPtyId: 'serve-1',
       orcaIncarnationId: 'inc_1',
-      orcaExecutionHostId: 'ssh:h',
+      orcaExecutionHostId: 'local',
       orcaWorktreeId: 'repo::/work',
       orcaAgentIdentity: 'claude',
       orcaTerminalTitle: '修复登录问题',
@@ -149,6 +150,7 @@ describe('buildAdoptSelectCard (V2 picker)', () => {
   it('does not expose an Orca handle when the terminal has no readable title', () => {
     const card = parse(buildAdoptSelectCard([{
       source: 'orca',
+      orcaInstance: 'relay',
       orcaTerminalHandle: 'term_internal_uuid',
       orcaPtyId: 'ssh:h@@pty:1',
       orcaIncarnationId: 'inc_1',

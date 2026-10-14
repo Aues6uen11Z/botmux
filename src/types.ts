@@ -1186,6 +1186,10 @@ export interface Session {
     orcaTerminalHandle?: string;
     /** Display snapshot from adoption; the handle remains the stable identity. */
     orcaTerminalTitle?: string;
+    /** Which Orca runtime owns the terminal: 'relay' (desktop runtime reached
+     *  over the SSH relay) or 'server' (local orcad). Absent = 'relay'
+     *  (rows persisted before server support). */
+    orcaInstance?: 'relay' | 'server';
     orcaPtyId?: string;
     orcaIncarnationId?: string;
     orcaExecutionHostId?: string;

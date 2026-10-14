@@ -19938,6 +19938,7 @@ export function forkAdoptWorker(
       executionHostId: adopted.orcaExecutionHostId,
       worktreeId: adopted.orcaWorktreeId!,
       agentIdentity: adopted.orcaAgentIdentity!,
+      instance: adopted.orcaInstance ?? 'relay',
     } : undefined,
     adoptOrcaSizeVerified: adopted.orcaPaneSizeVerified === true,
     adoptPaneCols: adopted.paneCols,
@@ -19947,7 +19948,7 @@ export function forkAdoptWorker(
     // codex uses for `/proc/<pid>/fd` rollout discovery (works even if
     // session-discovery couldn't probe sessionId up-front). zellij adopt ALSO
     // needs the pid unconditionally: Zellij watches it for liveness, while Orca
-    // uses a relay-attested local PID for transcript binding and attribution.
+    // uses a relay- or daemon-attested local PID for transcript binding.
     adoptCliPid: hasCliPid && adoptHasUsefulPid ? adopted.originalCliPid : undefined,
     adoptCwd: hasCliPid && adoptHasUsefulPid ? adopted.cwd : undefined,
     // Restored-from-metadata: this fork is recreating an /adopt session after

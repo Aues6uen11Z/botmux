@@ -1259,6 +1259,7 @@ export function validateAdoptTargetState(
       orcaExecutionHostId: target.orcaExecutionHostId,
       orcaWorktreeId: target.orcaWorktreeId,
       orcaAgentIdentity: target.orcaAgentIdentity,
+      orcaInstance: target.orcaInstance ?? 'relay',
     });
   }
   if (target.source === 'herdr') {

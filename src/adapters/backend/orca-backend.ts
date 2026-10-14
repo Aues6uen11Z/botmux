@@ -4,12 +4,14 @@ import {
   callOrcaSync,
   matchesOrcaTerminalIdentity,
   type OrcaExpectedTerminalIdentity,
+  type OrcaInstance,
   type OrcaTerminalIdentity,
 } from '../../services/orca-cli.js';
 import { logger } from '../../utils/logger.js';
 import { stripAnsiForLog } from '../../utils/crash-log.js';
 import { LivenessGate, ADOPT_LIVENESS_MAX_FAILURES } from './liveness-gate.js';
 import { queryOrcaRelayPtyMetadata } from '../../services/orca-relay.js';
+import { queryOrcaDaemonSessions } from '../../services/orca-daemon.js';
 
 const POLL_MS = 700;
 const SIZE_POLL_MS = 5_000;
@@ -51,9 +53,10 @@ interface TerminalShowResult {
   terminal?: OrcaTerminalIdentity;
 }
 
-/** Observe and drive an Orca terminal through its public CLI. The CLI already
- * routes local and SSH-host terminals through the running Orca instance, so
- * Botmux does not need a second pairing configuration. */
+/** Observe and drive an Orca terminal through its public CLI. The identity's
+ * `instance` field routes every call to the owning installation: the
+ * SSH-relay shim (desktop runtime over the relay) or the local server (orcad)
+ * CLI. Both speak the same command surface. */
 export class OrcaBackend implements ObserveBackend {
   readonly supportsRawCommandPasteLine = true;
   private readonly dataCbs: Array<(data: string) => void> = [];
@@ -77,14 +80,24 @@ export class OrcaBackend implements ObserveBackend {
   private rows = 50;
   private readonly sizeCbs: Array<(size: { cols: number; rows: number }) => void> = [];
 
+  private readonly identity: OrcaExpectedTerminalIdentity;
+  private readonly instance: OrcaInstance;
+  private readonly bracketedPaste: boolean;
+  private sizeVerified: boolean;
+
   cliPid?: number;
   cliCwd?: string;
 
   constructor(
-    private readonly identity: OrcaExpectedTerminalIdentity,
-    private readonly bracketedPaste = false,
-    private sizeVerified = false,
-  ) {}
+    identity: OrcaExpectedTerminalIdentity,
+    bracketedPaste = false,
+    sizeVerified = false,
+  ) {
+    this.identity = identity;
+    this.instance = identity.instance ?? 'relay';
+    this.bracketedPaste = bracketedPaste;
+    this.sizeVerified = sizeVerified;
+  }
 
   setWebHistory(history: string): void {
     this.webHistory = history.slice(-WEB_HISTORY_MAX_CHARS);
@@ -110,22 +123,34 @@ export class OrcaBackend implements ObserveBackend {
   }
 
   private async refreshSize(): Promise<void> {
-    const relayPtyId = this.relayPtyId();
-    if (!relayPtyId || this.stopped || this.sizeInFlight) return;
+    if (this.stopped || this.sizeInFlight) return;
     this.sizeInFlight = true;
     try {
-      const current = (await queryOrcaRelayPtyMetadata([relayPtyId])).get(relayPtyId);
-      if (!current?.cols || !current.rows) return;
-      const changed = current.cols !== this.cols || current.rows !== this.rows;
-      const newlyVerified = !this.sizeVerified;
-      this.sizeVerified = true;
-      this.cols = current.cols;
-      this.rows = current.rows;
-      if (changed || newlyVerified) {
-        for (const cb of this.sizeCbs) cb({ cols: this.cols, rows: this.rows });
-      }
+      // Authoritative geometry: the terminal daemon for server terminals
+      // (keyed by handle), the SSH relay socket for relay terminals.
+      const current = this.instance === 'server'
+        ? (await queryOrcaDaemonSessions()).get(this.identity.terminalHandle)
+        : await this.relaySize();
+      if (current?.cols && current.rows) this.applyAuthoritativeSize(current.cols, current.rows);
     } finally {
       this.sizeInFlight = false;
+    }
+  }
+
+  private async relaySize(): Promise<{ cols?: number; rows?: number } | undefined> {
+    const relayPtyId = this.relayPtyId();
+    if (!relayPtyId) return undefined;
+    return (await queryOrcaRelayPtyMetadata([relayPtyId])).get(relayPtyId);
+  }
+
+  private applyAuthoritativeSize(cols: number, rows: number): void {
+    const changed = cols !== this.cols || rows !== this.rows;
+    const newlyVerified = !this.sizeVerified;
+    this.sizeVerified = true;
+    this.cols = cols;
+    this.rows = rows;
+    if (changed || newlyVerified) {
+      for (const cb of this.sizeCbs) cb({ cols: this.cols, rows: this.rows });
     }
   }
 
@@ -135,7 +160,7 @@ export class OrcaBackend implements ObserveBackend {
     try {
       const result = await callOrca<TerminalReadResult>([
         'terminal', 'read', '--terminal', this.identity.terminalHandle, '--screen', '--limit', '1000',
-      ]);
+      ], this.instance);
       if (this.stopped) return;
       if (!result.ok) {
         if (result.kind === 'missing' && this.liveness.record(false)) void this.confirmMissing();
@@ -170,7 +195,7 @@ export class OrcaBackend implements ObserveBackend {
     try {
       const result = await callOrca<TerminalShowResult>([
         'terminal', 'show', '--terminal', this.identity.terminalHandle,
-      ]);
+      ], this.instance);
       if (!result.ok) {
         if (result.kind === 'missing') this.handleExit();
         return;
@@ -189,7 +214,7 @@ export class OrcaBackend implements ObserveBackend {
   private identityMatchesSync(): boolean {
     const result = callOrcaSync<TerminalShowResult>([
       'terminal', 'show', '--terminal', this.identity.terminalHandle,
-    ]);
+    ], this.instance);
     if (!result.ok) return false;
     const matches = !!result.value.terminal
       && matchesOrcaTerminalIdentity(result.value.terminal, this.identity);
@@ -201,7 +226,7 @@ export class OrcaBackend implements ObserveBackend {
     if (!this.identityMatchesSync()) return 'unknown';
     const result = callOrcaSync<TerminalReadResult>([
       'terminal', 'read', '--terminal', this.identity.terminalHandle, '--screen', '--limit', '1',
-    ]);
+    ], this.instance);
     if (!result.ok || result.value.terminal?.status !== 'running') return 'unknown';
     this.hasUnsubmittedDraft = typeof result.value.terminal.draft === 'string'
       && result.value.terminal.draft.length > 0;
@@ -252,7 +277,7 @@ export class OrcaBackend implements ObserveBackend {
       if (this.stopped) return;
       const identity = await callOrca<TerminalShowResult>([
         'terminal', 'show', '--terminal', this.identity.terminalHandle,
-      ]);
+      ], this.instance);
       if (!identity.ok) {
         logger.warn('[orca-adopt] Web Terminal input refused: target identity could not be verified');
         return;
@@ -263,7 +288,7 @@ export class OrcaBackend implements ObserveBackend {
         this.handleExit();
         return;
       }
-      const result = await callOrca<TerminalSendResult>(args, 15_000);
+      const result = await callOrca<TerminalSendResult>(args, this.instance, 15_000);
       if (!result.ok || result.value.send?.accepted !== true) {
         logger.warn(`[orca-adopt] Web Terminal input rejected: ${result.ok ? 'not accepted' : result.message}`);
       }
@@ -308,7 +333,7 @@ export class OrcaBackend implements ObserveBackend {
       args.push('--text', bracketedPaste ? `${BRACKETED_PASTE_START}${text}${BRACKETED_PASTE_END}` : text);
     }
     if (enter) args.push('--enter');
-    const result = callOrcaSync<TerminalSendResult>(args, 15_000);
+    const result = callOrcaSync<TerminalSendResult>(args, this.instance, 15_000);
     if (!result.ok) throw new Error(`Orca terminal send was not confirmed: ${result.message}`);
     if (result.value.send?.accepted !== true) throw new Error('Orca terminal rejected input');
     this.hasUnsubmittedDraft = false;
@@ -318,7 +343,7 @@ export class OrcaBackend implements ObserveBackend {
     if (!this.identityMatchesSync()) throw new Error('Orca terminal identity could not be verified');
     const result = callOrcaSync<TerminalSendResult>([
       'terminal', 'send', '--terminal', this.identity.terminalHandle, '--interrupt',
-    ], 15_000);
+    ], this.instance, 15_000);
     if (!result.ok) throw new Error(`Orca terminal interrupt was not confirmed: ${result.message}`);
     if (result.value.send?.accepted !== true) throw new Error('Orca terminal rejected interrupt');
   }

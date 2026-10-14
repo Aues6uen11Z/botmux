@@ -4,6 +4,7 @@ import {
   callOrcaSync,
   hasStableOrcaTerminalIdentity,
   matchesOrcaTerminalIdentity,
+  type OrcaInstance,
   type OrcaTerminalIdentity,
 } from '../services/orca-cli.js';
 import { readdirSync, readFileSync, readlinkSync } from 'node:fs';
@@ -13,6 +14,7 @@ import { findCocoSessionByPid } from '../services/coco-transcript.js';
 import { findTraexRolloutByPid } from '../services/traex-transcript.js';
 import { readClaudeSessionMeta } from '../services/claude-transcript.js';
 import { queryOrcaRelayPtyMetadata } from '../services/orca-relay.js';
+import { queryOrcaDaemonSessions, type OrcaDaemonSessionMetadata } from '../services/orca-daemon.js';
 
 export interface OrcaTerminalSummary extends OrcaTerminalIdentity {
   worktreePath: string;
@@ -22,6 +24,7 @@ export interface OrcaTerminalSummary extends OrcaTerminalIdentity {
 }
 export interface OrcaAdoptableSession {
   source: 'orca';
+  orcaInstance: OrcaInstance;
   orcaTerminalHandle: string;
   orcaPtyId?: string;
   orcaIncarnationId?: string;
@@ -169,7 +172,8 @@ export function cliIdFromOrcaAgentIdentity(identity: string | undefined): CliId 
 
 function toCandidate(
   terminal: OrcaTerminalSummary,
-  filterCliId?: CliId,
+  filterCliId: CliId | undefined,
+  instance: OrcaInstance,
   localPids: ReadonlyMap<string, { pid: number; cliId: CliId }> = new Map(),
   sizes: ReadonlyMap<string, { cols: number; rows: number }> = new Map(),
 ): OrcaAdoptableSession | undefined {
@@ -183,6 +187,7 @@ function toCandidate(
   const size = sizes.get(terminal.handle);
   return {
     source: 'orca',
+    orcaInstance: instance,
     orcaTerminalHandle: terminal.handle,
     orcaPtyId: terminal.ptyId ?? undefined,
     orcaIncarnationId: terminal.incarnationId ?? undefined,
@@ -195,8 +200,8 @@ function toCandidate(
     sessionId: sessionIdForCliPid(cliId, cliPid),
     cwd: terminal.worktreePath,
     startedAt: undefined,
-    // The public CLI does not expose geometry. Same-host relay metadata is
-    // authoritative; cross-host targets retain conservative render defaults.
+    // Without an attested geometry (relay socket or terminal daemon) the
+    // public CLI offers none; keep conservative render defaults.
     paneCols: size?.cols ?? 120,
     paneRows: size?.rows ?? 50,
     paneSizeVerified: size !== undefined,
@@ -210,26 +215,37 @@ function relayPtyId(terminal: OrcaTerminalSummary): string | undefined {
 }
 
 async function localPidsForTerminals(
-  terminals: readonly OrcaTerminalSummary[],
+  instances: ReadonlyArray<{ instance: OrcaInstance; terminals: readonly OrcaTerminalSummary[] }>,
+  daemonSessions: ReadonlyMap<string, OrcaDaemonSessionMetadata>,
 ): Promise<{
   localPids: Map<string, { pid: number; cliId: CliId }>;
   sizes: Map<string, { cols: number; rows: number }>;
 }> {
-  const relayIds = terminals.flatMap(terminal => {
-    const id = relayPtyId(terminal);
-    return id ? [id] : [];
-  });
-  const metadata = await queryOrcaRelayPtyMetadata(relayIds);
+  const relayIds = instances.flatMap(({ instance, terminals }) => (
+    instance === 'relay'
+      ? terminals.flatMap(terminal => {
+        const id = relayPtyId(terminal);
+        return id ? [id] : [];
+      })
+      : []
+  ));
+  const relayMetadata = relayIds.length > 0 ? await queryOrcaRelayPtyMetadata(relayIds) : new Map<string, never>();
   const rootsByHandle = new Map<string, number>();
   const expectedCliByHandle = new Map<string, CliId>();
   const sizes = new Map<string, { cols: number; rows: number }>();
-  for (const terminal of terminals) {
-    const id = relayPtyId(terminal);
-    const entry = id ? metadata.get(id) : undefined;
-    if (entry?.pid) rootsByHandle.set(terminal.handle, entry.pid);
-    const expectedCliId = cliIdFromOrcaAgentIdentity(terminal.agentIdentity);
-    if (expectedCliId) expectedCliByHandle.set(terminal.handle, expectedCliId);
-    if (entry?.cols && entry.rows) sizes.set(terminal.handle, { cols: entry.cols, rows: entry.rows });
+  for (const { instance, terminals } of instances) {
+    for (const terminal of terminals) {
+      // Same-host root pids and geometry: relay terminals via the SSH relay
+      // socket, server terminals via the terminal daemon, both keyed by handle.
+      const relayId = instance === 'relay' ? relayPtyId(terminal) : undefined;
+      const entry = instance === 'server'
+        ? daemonSessions.get(terminal.handle)
+        : relayId ? relayMetadata.get(relayId) : undefined;
+      if (entry?.pid) rootsByHandle.set(terminal.handle, entry.pid);
+      if (entry?.cols && entry.rows) sizes.set(terminal.handle, { cols: entry.cols, rows: entry.rows });
+      const expectedCliId = cliIdFromOrcaAgentIdentity(terminal.agentIdentity);
+      if (expectedCliId) expectedCliByHandle.set(terminal.handle, expectedCliId);
+    }
   }
   return { localPids: scanLocalOrcaCliPids(rootsByHandle, expectedCliByHandle), sizes };
 }
@@ -241,14 +257,29 @@ export async function discoverAdoptableOrcaSessions(
   // Orca exposes an agent kind, not the exact executable. A configured custom
   // runtime therefore cannot be proven to be the bot's selected distribution.
   if (filterExecutable) return [];
-  const result = await callOrca<TerminalListResult>(['terminal', 'list', '--limit', '1000']);
-  if (!result.ok) return [];
-  const terminals = result.value.terminals ?? [];
-  const { localPids, sizes } = await localPidsForTerminals(terminals);
-  return terminals.flatMap((terminal) => {
-    const candidate = toCandidate(terminal, filterCliId, localPids, sizes);
-    return candidate ? [candidate] : [];
-  });
+  const [relayList, serverList, daemonSessions] = await Promise.all([
+    callOrca<TerminalListResult>(['terminal', 'list', '--limit', '1000']),
+    callOrca<TerminalListResult>(['terminal', 'list', '--limit', '1000'], 'server'),
+    queryOrcaDaemonSessions(),
+  ]);
+  const instances = [
+    ...(relayList.ok ? [{ instance: 'relay' as const, terminals: relayList.value.terminals ?? [] }] : []),
+    ...(serverList.ok ? [{ instance: 'server' as const, terminals: serverList.value.terminals ?? [] }] : []),
+  ];
+  const { localPids, sizes } = await localPidsForTerminals(instances, daemonSessions);
+  const byHandle = new Map<string, OrcaAdoptableSession>();
+  for (const { instance, terminals } of instances) {
+    for (const terminal of terminals) {
+      const candidate = toCandidate(terminal, filterCliId, instance, localPids, sizes);
+      if (!candidate) continue;
+      // The relay resolver's PATH fallback can land on the server CLI, so the
+      // same handle may surface from both instances; keep the server entry,
+      // which carries daemon-attested pid/geometry.
+      const existing = byHandle.get(candidate.orcaTerminalHandle);
+      if (!existing || instance === 'server') byHandle.set(candidate.orcaTerminalHandle, candidate);
+    }
+  }
+  return [...byHandle.values()];
 }
 
 export async function discoverAdoptableOrcaSessionByHandle(
@@ -257,20 +288,30 @@ export async function discoverAdoptableOrcaSessionByHandle(
   filterExecutable?: string,
 ): Promise<OrcaAdoptableSession | undefined> {
   if (!handle || filterExecutable) return undefined;
-  const result = await callOrca<TerminalShowResult>(['terminal', 'show', '--terminal', handle]);
-  if (!result.ok || !result.value.terminal) return undefined;
-  const { localPids, sizes } = await localPidsForTerminals([result.value.terminal]);
-  return toCandidate(result.value.terminal, filterCliId, localPids, sizes);
+  const [relayResult, serverResult, daemonSessions] = await Promise.all([
+    callOrca<TerminalShowResult>(['terminal', 'show', '--terminal', handle]),
+    callOrca<TerminalShowResult>(['terminal', 'show', '--terminal', handle], 'server'),
+    queryOrcaDaemonSessions(),
+  ]);
+  // Prefer the server instance on dual hits (same rationale as list dedup).
+  const serverTerminal = serverResult.ok ? serverResult.value.terminal : undefined;
+  const relayTerminal = relayResult.ok ? relayResult.value.terminal : undefined;
+  const instance: OrcaInstance | undefined = serverTerminal ? 'server' : relayTerminal ? 'relay' : undefined;
+  const terminal = instance === 'server' ? serverTerminal : relayTerminal;
+  if (!instance || !terminal) return undefined;
+  const { localPids, sizes } = await localPidsForTerminals([{ instance, terminals: [terminal] }], daemonSessions);
+  return toCandidate(terminal, filterCliId, instance, localPids, sizes);
 }
 
 export type OrcaAdoptValidationResult = 'alive' | 'missing' | 'unknown';
 
 export function validateOrcaAdoptTarget(
-  target: Pick<OrcaAdoptableSession, 'orcaTerminalHandle' | 'orcaPtyId' | 'orcaIncarnationId' | 'orcaExecutionHostId' | 'orcaWorktreeId' | 'orcaAgentIdentity'>,
+  target: Pick<OrcaAdoptableSession, 'orcaTerminalHandle' | 'orcaPtyId' | 'orcaIncarnationId' | 'orcaExecutionHostId' | 'orcaWorktreeId' | 'orcaAgentIdentity'> & { orcaInstance?: OrcaInstance },
 ): OrcaAdoptValidationResult {
+  // Absent instance = rows persisted before server support; they are relay terminals.
   const result = callOrcaSync<TerminalShowResult>([
     'terminal', 'show', '--terminal', target.orcaTerminalHandle,
-  ]);
+  ], target.orcaInstance ?? 'relay');
   if (!result.ok) return result.kind === 'missing' ? 'missing' : 'unknown';
   const terminal = result.value.terminal;
   if (!terminal) return 'missing';
