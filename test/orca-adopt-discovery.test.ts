@@ -309,6 +309,27 @@ describe('Orca adopt discovery', () => {
     })).toBe('missing');
   });
 
+  it('fails closed on restore when a persisted identity field is missing', () => {
+    // A matching terminal would validate 'alive', so only the presence guard
+    // can produce 'missing' — mutating the guard away reddens this test.
+    const full = {
+      source: 'orca',
+      orcaTerminalHandle: 'term_1',
+      orcaPtyId: 'ssh:h@@pty:1',
+      orcaIncarnationId: 'inc_1',
+      orcaExecutionHostId: 'ssh:h',
+      orcaWorktreeId: 'repo::/work',
+      orcaAgentIdentity: 'trae',
+      cliId: 'traex',
+      cwd: '/work',
+    };
+    state.syncCall.mockReturnValue({ ok: true, value: { terminal } });
+    for (const key of ['orcaTerminalHandle', 'orcaWorktreeId', 'orcaAgentIdentity']) {
+      expect(validateAdoptTargetState({ ...full, [key]: undefined })).toBe('missing');
+    }
+    expect(state.syncCall).not.toHaveBeenCalled();
+  });
+
   it('keeps transport failures distinct from a missing terminal', () => {
     state.syncCall.mockReturnValue({ ok: false, kind: 'unavailable', message: 'offline' });
     expect(validateOrcaAdoptTarget({
