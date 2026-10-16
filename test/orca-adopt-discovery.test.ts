@@ -64,9 +64,10 @@ type OrcaCallResult = { ok: boolean; value?: unknown; kind?: string; message?: s
 
 /** Instance-aware CLI mock: the relay list is served unless a server list is
  * pinned, mirroring a machine where only one Orca installation answers. */
-function mockOrcaLists(lists: { relay?: OrcaCallResult; server?: OrcaCallResult } = {}): void {
+function mockOrcaLists(lists: { relay?: OrcaCallResult; server?: OrcaCallResult; local?: OrcaCallResult } = {}): void {
   state.asyncCall.mockImplementation(async (_args: string[], instance?: string) => {
     if (instance === 'server') return lists.server ?? { ok: false, kind: 'unavailable', message: 'no orcad' };
+    if (instance === 'relay-local') return lists.local ?? { ok: false, kind: 'unavailable', message: 'no local relay' };
     return lists.relay ?? { ok: false, kind: 'unavailable', message: 'no relay shim' };
   });
 }
@@ -167,6 +168,26 @@ describe('Orca adopt discovery', () => {
       .toEqual([['term_1', 'relay'], ['term_srv', 'server']]);
   });
 
+  it('discovers the original local relay terminal after the desktop disconnects', async () => {
+    mockOrcaLists({
+      relay: { ok: false, kind: 'unavailable', message: 'No owning Orca client is connected to the relay' },
+      local: { ok: true, value: { terminals: [{ ...terminal, pid: 100, cols: 104, rows: 40 }] } },
+    });
+    expect(await discoverAdoptableOrcaSessions('traex')).toMatchObject([{
+      orcaTerminalHandle: 'term_1', orcaInstance: 'relay-local', paneCols: 104, paneRows: 40,
+      paneSizeVerified: true,
+    }]);
+    expect(state.roots).not.toHaveBeenCalled();
+  });
+
+  it('prefers the autonomous local relay route while the desktop is still online', async () => {
+    mockOrcaLists({
+      relay: { ok: true, value: { terminals: [terminal] } },
+      local: { ok: true, value: { terminals: [{ ...terminal, pid: 100, cols: 104, rows: 40 }] } },
+    });
+    expect(await discoverAdoptableOrcaSessions('traex')).toMatchObject([{ orcaInstance: 'relay-local' }]);
+  });
+
   it('keeps the server entry when both instances report the same handle', async () => {
     mockOrcaLists({
       relay: { ok: true, value: { terminals: [terminal] } },
@@ -188,7 +209,7 @@ describe('Orca adopt discovery', () => {
       .toMatchObject({ orcaInstance: 'server', orcaTerminalHandle: 'term_1' });
 
     state.asyncCall.mockImplementation(async (_args: string[], instance?: string) => (
-      instance === 'server'
+      instance === 'server' || instance === 'relay-local'
         ? { ok: false, kind: 'missing', message: 'terminal_not_found' }
         : { ok: true, value: { terminal } }
     ));

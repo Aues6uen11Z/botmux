@@ -1,11 +1,12 @@
-import { createConnection } from 'node:net';
+import { createConnection, type Socket } from 'node:net';
 import { readFileSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { locateExecutable } from '../utils/executable.js';
 import { resolveOrcaBinary } from './orca-cli.js';
 
-const HEADER_BYTES = 13;
-const MAX_FRAME_BYTES = 16 * 1024 * 1024;
+const MAX_BYTES = 16 * 1024 * 1024;
+
+export interface OrcaRelayEndpoint { socketPath: string; version: string; credential: string }
 
 interface SerializedPty {
   id: string;
@@ -48,84 +49,112 @@ function relayConfig(): { socketPath: string; relayDir: string; credentialFile: 
 /** Read PTY root PIDs from the already-running Orca SSH relay. This is a
  * read-only authenticated side channel used only to bind local transcripts;
  * terminal discovery and control continue to use Orca's public CLI. */
-export function queryOrcaRelayPtyMetadata(ids: readonly string[]): Promise<Map<string, OrcaRelayPtyMetadata>> {
+export async function queryOrcaRelayPtyMetadata(ids: readonly string[]): Promise<Map<string, OrcaRelayPtyMetadata>> {
   const config = relayConfig();
-  if (!config || ids.length === 0) return Promise.resolve(new Map());
-  const { socketPath, relayDir, credentialFile } = config;
-
-  let version: string;
-  let endpointCredential: string;
+  if (!config || ids.length === 0) return new Map();
+  let client: OrcaRelayClient | undefined;
   try {
-    version = readFileSync(`${relayDir}/.version`, 'utf-8').trim();
-    endpointCredential = readFileSync(credentialFile, 'utf-8').trim();
-  } catch {
-    return Promise.resolve(new Map());
-  }
+    const version = readFileSync(`${config.relayDir}/.version`, 'utf-8').trim();
+    const credential = readFileSync(config.credentialFile, 'utf-8').trim();
+    client = await OrcaRelayClient.open({ socketPath: config.socketPath, version, credential }, 3_000);
+    const serialized = await client.request('pty.serialize', { ids });
+    if (typeof serialized !== 'string') return new Map();
+    const rows = JSON.parse(serialized) as SerializedPty[];
+    if (!Array.isArray(rows)) return new Map();
+    return new Map(rows.flatMap(row => (
+      typeof row?.id === 'string' && Number.isInteger(row?.pid) && row.pid > 0
+        ? [[row.id, {
+          pid: row.pid,
+          ...(Number.isInteger(row.cols) && row.cols! > 0 ? { cols: row.cols } : {}),
+          ...(Number.isInteger(row.rows) && row.rows! > 0 ? { rows: row.rows } : {}),
+        }] as const]
+        : []
+    )));
+  } catch { return new Map(); }
+  finally { client?.close(); }
+}
 
-  return new Promise((resolve) => {
-    const socket = createConnection(socketPath);
-    let settled = false;
-    let buffer = Buffer.alloc(0);
+export class OrcaRelayClient {
+  private buffer = Buffer.alloc(0);
+  private nextId = 0;
+  private pending?: { id: number; resolve(value: unknown): void; reject(error: Error): void };
+  private readonly socket: Socket;
+  private readonly timer: ReturnType<typeof setTimeout>;
+  private failure?: Error;
+
+  private constructor(endpoint: OrcaRelayEndpoint, timeoutMs: number, ready: (client: OrcaRelayClient) => void, reject: (error: Error) => void) {
+    this.socket = createConnection(endpoint.socketPath);
+    this.timer = setTimeout(() => this.fail(new Error('Orca local relay connection timed out')), timeoutMs);
     let handshaken = false;
-    const finish = (value: Map<string, OrcaRelayPtyMetadata>) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      socket.destroy();
-      resolve(value);
-    };
-    const sendFrame = (type: number, payload: unknown) => {
-      const body = Buffer.from(JSON.stringify(payload));
-      const header = Buffer.alloc(HEADER_BYTES);
-      header[0] = type;
-      header.writeUInt32BE(1, 1);
-      header.writeUInt32BE(0, 5);
-      header.writeUInt32BE(body.length, 9);
-      socket.write(Buffer.concat([header, body]));
-    };
-    const timer = setTimeout(() => finish(new Map()), 3_000);
-    timer.unref?.();
-    socket.once('connect', () => sendFrame(2, {
-      type: 'orca-relay-handshake',
-      version,
-      endpointCredential,
+    this.socket.once('connect', () => this.send(2, {
+      type: 'orca-relay-handshake', version: endpoint.version, endpointCredential: endpoint.credential,
     }));
-    socket.on('data', (chunk) => {
-      buffer = Buffer.concat([buffer, chunk]);
-      while (buffer.length >= HEADER_BYTES) {
-        const type = buffer[0]!;
-        const length = buffer.readUInt32BE(9);
-        if (length > MAX_FRAME_BYTES) return finish(new Map());
-        if (buffer.length < HEADER_BYTES + length) return;
-        const payload = buffer.subarray(HEADER_BYTES, HEADER_BYTES + length);
-        buffer = buffer.subarray(HEADER_BYTES + length);
+    this.socket.on('data', chunk => {
+      this.buffer = Buffer.concat([this.buffer, chunk]);
+      if (this.buffer.length > MAX_BYTES) return this.fail(new Error('Orca relay response too large'));
+      while (this.buffer.length >= 13) {
+        const type = this.buffer[0];
+        const bytes = this.buffer.readUInt32BE(9);
+        if (bytes > MAX_BYTES) return this.fail(new Error('Orca relay frame too large'));
+        if (this.buffer.length < 13 + bytes) return;
+        const body = this.buffer.subarray(13, 13 + bytes);
+        this.buffer = this.buffer.subarray(13 + bytes);
+        if (type !== 1 && type !== 2) continue;
         let message: any;
-        try { message = JSON.parse(payload.toString('utf-8')); } catch { continue; }
+        try { message = JSON.parse(body.toString('utf-8')); } catch { return this.fail(new Error('Invalid Orca relay response')); }
         if (!handshaken) {
-          if (type !== 2 || message?.type !== 'orca-relay-handshake-ok') return finish(new Map());
+          if (type !== 2 || message?.type !== 'orca-relay-handshake-ok') return this.fail(new Error('Orca relay handshake refused'));
           handshaken = true;
-          sendFrame(1, { jsonrpc: '2.0', id: 1, method: 'pty.serialize', params: { ids } });
+          ready(this);
           continue;
         }
-        if (type !== 1 || message?.id !== 1) continue;
-        if (message.error || typeof message.result !== 'string') return finish(new Map());
-        try {
-          const rows = JSON.parse(message.result) as SerializedPty[];
-          return finish(new Map(rows.flatMap(row => (
-            typeof row?.id === 'string' && Number.isInteger(row?.pid) && row.pid > 0
-              ? [[row.id, {
-                pid: row.pid,
-                ...(Number.isInteger(row.cols) && row.cols! > 0 ? { cols: row.cols } : {}),
-                ...(Number.isInteger(row.rows) && row.rows! > 0 ? { rows: row.rows } : {}),
-              }] as const]
-              : []
-          ))));
-        } catch {
-          return finish(new Map());
-        }
+        if (type !== 1 || !this.pending || message?.id !== this.pending.id) continue;
+        const pending = this.pending!;
+        this.pending = undefined;
+        if (message.error) pending.reject(new Error(String(message.error.message ?? 'Orca relay request failed')));
+        else if (!Object.hasOwn(message, 'result')) pending.reject(new Error('Invalid Orca relay result'));
+        else pending.resolve(message.result);
       }
     });
-    socket.once('error', () => finish(new Map()));
-    socket.once('close', () => finish(new Map()));
-  });
+    this.socket.once('error', error => this.fail(error));
+    this.socket.once('close', () => { reject(this.failure ?? new Error('Orca relay socket closed')); this.fail(new Error('Orca relay socket closed')); });
+  }
+
+  static open(endpoint: OrcaRelayEndpoint, timeoutMs: number): Promise<OrcaRelayClient> {
+    return new Promise((resolve, reject) => { new OrcaRelayClient(endpoint, timeoutMs, resolve, reject); });
+  }
+
+  private send(type: number, message: unknown): void {
+    const body = Buffer.from(JSON.stringify(message));
+    if (body.length > MAX_BYTES) throw new Error('Orca relay request too large');
+    const header = Buffer.alloc(13);
+    header[0] = type;
+    header.writeUInt32BE(body.length, 9);
+    this.socket.write(Buffer.concat([header, body]));
+  }
+
+  request(method: string, params: Record<string, unknown> = {}): Promise<unknown> {
+    if (this.failure) return Promise.reject(this.failure);
+    if (this.pending) return Promise.reject(new Error('Orca relay request already pending'));
+    return new Promise((resolve, reject) => {
+      const id = ++this.nextId;
+      this.pending = { id, resolve, reject };
+      this.send(1, { jsonrpc: '2.0', id, method, params });
+    });
+  }
+
+  notify(method: string, params: Record<string, unknown>): void {
+    if (this.failure) throw this.failure;
+    this.send(1, { jsonrpc: '2.0', method, params });
+  }
+
+  close(): void { this.fail(new Error('Orca relay client closed')); }
+  private fail(error: Error): void {
+    if (this.failure) return;
+    this.failure = error;
+    clearTimeout(this.timer);
+    this.pending?.reject(error);
+    this.pending = undefined;
+    this.socket.destroy();
+  }
 }

@@ -3,10 +3,10 @@ import { adoptedFromForTarget } from '../src/core/adopt-target.js';
 import { adoptTargetLabel } from '../src/core/session-discovery.js';
 
 describe('adoptedFromForTarget', () => {
-  it('preserves every restart identity field for an Orca target', () => {
+  it.each(['server', 'relay-local'] as const)('preserves every restart identity field for an Orca %s target', instance => {
     expect(adoptedFromForTarget({
       source: 'orca',
-      orcaInstance: 'server',
+      orcaInstance: instance,
       orcaTerminalHandle: 'term_1',
       orcaTerminalTitle: 'Fix login',
       orcaPtyId: 'serve-1',
@@ -23,7 +23,7 @@ describe('adoptedFromForTarget', () => {
       paneSizeVerified: true,
     })).toEqual({
       source: 'orca',
-      orcaInstance: 'server',
+      orcaInstance: instance,
       orcaTerminalHandle: 'term_1',
       orcaTerminalTitle: 'Fix login',
       orcaPtyId: 'serve-1',

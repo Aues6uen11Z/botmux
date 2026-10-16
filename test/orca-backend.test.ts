@@ -302,4 +302,24 @@ describe('OrcaBackend', () => {
     await (backend as unknown as { confirmMissing(): Promise<void> }).confirmMissing();
     expect(exits).toEqual([1]);
   });
+
+  it('keeps local relay polling and input bound to the persisted terminal identity', async () => {
+    api.asyncCall.mockResolvedValue({ ok: true, value: { terminal: { status: 'running', source: 'screen', tail: ['original'], cols: 104, rows: 40 } } });
+    api.syncCall.mockImplementation((args: string[]) => args[1] === 'show'
+      ? { ok: true, value: { terminal: liveIdentity() } }
+      : { ok: true, value: { send: { accepted: true } } });
+    const expected = identity({ instance: 'relay-local' });
+    const backend = new OrcaBackend(expected);
+    backend.spawn('', [], { cwd: '/w', cols: 80, rows: 24, env: {} });
+    await vi.runOnlyPendingTimersAsync();
+    expect(backend.captureCurrentScreen()).toContain('original');
+    expect(backend.getPaneSize()).toEqual({ cols: 104, rows: 40 });
+    expect(api.asyncCall.mock.calls.every(call => call[1] === 'relay-local' && call[3] === expected)).toBe(true);
+    backend.sendText('once');
+    backend.sendSpecialKeys('Enter');
+    expect(api.syncCall).toHaveBeenLastCalledWith([
+      'terminal', 'send', '--terminal', 'term_1', '--text', 'once', '--enter',
+    ], 'relay-local', 15_000, expected);
+    backend.kill();
+  });
 });

@@ -82,6 +82,17 @@ describe('Orca CLI envelope', () => {
     ]);
   });
 
+  it('runs local relay requests through the self-hosted helper with identity in stdin', () => {
+    child.sync.mockReturnValue(JSON.stringify({ ok: true, result: { send: { accepted: true } } }));
+    const expected = { terminalHandle: 'term_1', incarnationId: 'inc_1', worktreeId: 'repo::/work', agentIdentity: 'trae' };
+    expect(callOrcaSync(['terminal', 'send', '--terminal', 'term_1', '--text', 'once', '--enter'], 'relay-local', 15_000, expected))
+      .toEqual({ ok: true, value: { send: { accepted: true } } });
+    expect(child.sync.mock.calls[0]?.[1]).toContain('__orca-relay-local');
+    expect(JSON.parse(child.sync.mock.calls[0]?.[2].input)).toEqual({
+      args: ['terminal', 'send', '--terminal', 'term_1', '--text', 'once', '--enter'], expected, timeoutMs: 15_000,
+    });
+  });
+
   it('classifies a stale terminal separately from transport failure', () => {
     child.sync.mockImplementation(() => {
       throw Object.assign(new Error('failed'), {

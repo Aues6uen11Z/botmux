@@ -2,13 +2,14 @@ import { execFile, execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { isExecutable } from '../utils/executable.js';
+import { resolveCliSpawn } from '../core/self-spawn.js';
+import { fileURLToPath } from 'node:url';
 
 const ORCA_TIMEOUT_MS = 8_000;
 const ORCA_MAX_BUFFER = 16 * 1024 * 1024;
 
-/** Which Orca installation drives this terminal: the SSH-relay shim (desktop
- * runtime reachable over the relay) or the local server (orcad) CLI. */
-export type OrcaInstance = 'relay' | 'server';
+/** Terminal route: desktop CLI via SSH relay, local orcad CLI, or direct local relay control. */
+export type OrcaInstance = 'relay' | 'server' | 'relay-local';
 
 export interface OrcaTerminalIdentity {
   handle: string;
@@ -135,7 +136,19 @@ export function callOrcaSync<T>(
   args: readonly string[],
   instance: OrcaInstance = 'relay',
   timeoutMs = ORCA_TIMEOUT_MS,
+  expected?: OrcaExpectedTerminalIdentity,
 ): OrcaCallResult<T> {
+  if (instance === 'relay-local') {
+    const child = resolveCliSpawn(fileURLToPath(new URL('../cli.js', import.meta.url)), ['__orca-relay-local']);
+    try {
+      return parseEnvelope<T>(execFileSync(child.command, child.args, {
+        input: JSON.stringify({ args, expected, timeoutMs }), encoding: 'utf-8', timeout: timeoutMs,
+        maxBuffer: ORCA_MAX_BUFFER, stdio: ['pipe', 'pipe', 'pipe'],
+      }));
+    } catch (error: any) {
+      return classifyFailure(error?.stderr?.toString() || error?.message || 'Local Orca relay unavailable');
+    }
+  }
   const bin = binaryForInstance(instance);
   if (!bin) return { ok: false, kind: 'unavailable', message: 'Orca server CLI not found' };
   try {
@@ -158,7 +171,11 @@ export function callOrca<T>(
   args: readonly string[],
   instance: OrcaInstance = 'relay',
   timeoutMs = ORCA_TIMEOUT_MS,
+  expected?: OrcaExpectedTerminalIdentity,
 ): Promise<OrcaCallResult<T>> {
+  if (instance === 'relay-local') {
+    return import('./orca-local-relay.js').then(module => module.callLocalOrcaRelay(args, timeoutMs, expected)) as Promise<OrcaCallResult<T>>;
+  }
   return new Promise((resolve) => {
     const bin = binaryForInstance(instance);
     if (!bin) return resolve({ ok: false, kind: 'unavailable', message: 'Orca server CLI not found' });
