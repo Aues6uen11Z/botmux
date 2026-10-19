@@ -1,9 +1,13 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer } from 'node:net';
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Server, Socket } from 'node:net';
+
+const mockState = vi.hoisted(() => ({
+  processEnv: 'ORCA_TERMINAL_HANDLE=term_offline\0ORCA_WORKTREE_ID=repo::/work\0',
+}));
 
 vi.mock('../src/services/orca-processes.js', () => ({
   scanLocalOrcaCliPids: () => new Map([['term_offline', { pid: 124, cliId: 'traex' }]]),
@@ -14,7 +18,7 @@ vi.mock('node:fs', async importOriginal => {
   return {
     ...actual,
     readFileSync: ((path: unknown, ...args: unknown[]) => path === '/proc/123/environ'
-      ? 'ORCA_TERMINAL_HANDLE=term_offline\0ORCA_WORKTREE_ID=repo::/work\0'
+      ? mockState.processEnv
       : (actual.readFileSync as (...args: unknown[]) => unknown)(path, ...args)) as typeof actual.readFileSync,
   };
 });
@@ -23,12 +27,22 @@ import { callLocalOrcaRelay } from '../src/services/orca-local-relay.js';
 
 const servers: Server[] = [];
 const sockets = new Set<Socket>();
+const originalRemoteDir = process.env.ORCA_REMOTE_DIR;
+let relayRoot = '';
+
+beforeEach(() => {
+  relayRoot = mkdtempSync(join(tmpdir(), 'botmux-orca-relay-'));
+  process.env.ORCA_REMOTE_DIR = relayRoot;
+  mockState.processEnv = 'ORCA_TERMINAL_HANDLE=term_offline\0ORCA_WORKTREE_ID=repo::/work\0';
+});
 
 afterEach(async () => {
   for (const socket of sockets) socket.destroy();
   sockets.clear();
   await Promise.all(servers.splice(0).map(server => new Promise<void>(resolve => server.close(() => resolve()))));
-  rmSync(join(homedir(), '.orca-remote'), { recursive: true, force: true });
+  rmSync(relayRoot, { recursive: true, force: true });
+  if (originalRemoteDir === undefined) delete process.env.ORCA_REMOTE_DIR;
+  else process.env.ORCA_REMOTE_DIR = originalRemoteDir;
 });
 
 function frame(type: number, value: unknown): Buffer {
@@ -39,8 +53,16 @@ function frame(type: number, value: unknown): Buffer {
   return Buffer.concat([header, body]);
 }
 
-async function relay(options: { online?: boolean; reuseAfterWrite?: boolean; forged?: boolean; incarnation?: string | null; foreground?: string } = {}) {
-  const dir = join(homedir(), '.orca-remote', `relay-test-${servers.length}`);
+async function relay(options: {
+  online?: boolean;
+  reuseAfterWrite?: boolean;
+  forged?: boolean;
+  incarnation?: string | null;
+  foreground?: string;
+  cols?: number;
+  rows?: number;
+} = {}) {
+  const dir = join(relayRoot, `relay-test-${servers.length}`);
   mkdirSync(dir, { recursive: true });
   const path = join(dir, 'relay.sock');
   writeFileSync(join(dir, '.version'), 'test-version');
@@ -77,7 +99,10 @@ async function relay(options: { online?: boolean; reuseAfterWrite?: boolean; for
               incarnationId: options.incarnation === null ? undefined : writes.length && options.reuseAfterWrite ? 'inc-reused' : options.incarnation ?? 'inc-1' }];
             break;
           case 'pty.serialize':
-            result = JSON.stringify([{ id: 'pty-1', terminalHandle: handle, worktreeId: 'repo::/work', cwd: '/work', pid: 123, cols: 80, rows: 24 }]);
+            result = JSON.stringify([{
+              id: 'pty-1', terminalHandle: handle, worktreeId: 'repo::/work', cwd: '/work', pid: 123,
+              cols: options.cols ?? 80, rows: options.rows ?? 24,
+            }]);
             break;
           case 'orca.cli':
             if (options.online) result = { stdout: JSON.stringify({ ok: true, result: { terminal: { status: 'running', source: 'screen', tail: ['desktop screen'] } } }) };
@@ -163,6 +188,17 @@ describe.skipIf(process.platform !== 'linux')('local Orca relay without its desk
 
   it.each([{ forged: true }, { incarnation: null }])('rejects unverifiable relay process metadata: %j', async options => {
     await relay(options);
+    expect(await callLocalOrcaRelay(['terminal', 'list'])).toEqual({ ok: true, value: { terminals: [] } });
+  });
+
+  it('rejects a process whose terminal handle matches but worktree ownership does not', async () => {
+    mockState.processEnv = 'ORCA_TERMINAL_HANDLE=term_offline\0ORCA_WORKTREE_ID=repo::/other\0';
+    await relay();
+    expect(await callLocalOrcaRelay(['terminal', 'list'])).toEqual({ ok: true, value: { terminals: [] } });
+  });
+
+  it.each([{ cols: 501, rows: 24 }, { cols: 80, rows: 501 }])('rejects unsafe relay geometry: %j', async dimensions => {
+    await relay(dimensions);
     expect(await callLocalOrcaRelay(['terminal', 'list'])).toEqual({ ok: true, value: { terminals: [] } });
   });
 });

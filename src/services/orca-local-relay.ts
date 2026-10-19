@@ -30,7 +30,7 @@ interface Terminal {
 }
 
 function endpoints(): OrcaRelayEndpoint[] {
-  const root = join(homedir(), '.orca-remote');
+  const root = process.env.ORCA_REMOTE_DIR || join(homedir(), '.orca-remote');
   const found: OrcaRelayEndpoint[] = [];
   let dirs: string[];
   try { dirs = readdirSync(root); } catch { return found; }

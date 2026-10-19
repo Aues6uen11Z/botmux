@@ -482,22 +482,25 @@ describe('findTraexThreadByPid', () => {
     const subagentFd = openSync(subagentLock, 'r');
     const db = openDatabaseSyncNow(join(traeHome, 'cli', 'state_5.sqlite'))!;
     db.exec('CREATE TABLE threads (id TEXT PRIMARY KEY, title TEXT, first_user_message TEXT, updated_at_ms INTEGER, thread_source TEXT)');
-    db.prepare('INSERT INTO threads VALUES (?, ?, ?, ?, ?)').run(
-      userId, '修复\n登录流程', 'fallback', 1, 'user',
-    );
+    const userTitle = `${'a'.repeat(77)}\n😀bc`;
+    db.prepare('INSERT INTO threads VALUES (?, ?, ?, ?, ?)').run(userId, userTitle, 'fallback', 1, 'user');
     db.prepare('INSERT INTO threads VALUES (?, ?, ?, ?, ?)').run(
       subagentId, '内部子任务', 'internal', 2, 'subagent',
     );
     db.close();
     process.env.TRAE_HOME = traeHome;
+    let userFdOpen = true;
 
     try {
       expect(findTraexThreadByPid(process.pid)).toEqual({
         cliSessionId: userId,
-        title: '修复 登录流程',
+        title: `${'a'.repeat(77)} 😀…`,
       });
-    } finally {
       closeSync(userFd);
+      userFdOpen = false;
+      expect(findTraexThreadByPid(process.pid)).toBeUndefined();
+    } finally {
+      if (userFdOpen) closeSync(userFd);
       closeSync(subagentFd);
       if (previousTraeHome === undefined) delete process.env.TRAE_HOME;
       else process.env.TRAE_HOME = previousTraeHome;

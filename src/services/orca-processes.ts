@@ -84,4 +84,3 @@ export function scanLocalOrcaCliPids(
   }
   return byHandle;
 }
-

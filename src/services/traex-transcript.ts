@@ -1300,9 +1300,10 @@ export function findTraexThreadByPid(
     const selected = candidates.find(row => row.source === 'user') ?? candidates[0];
     if (!selected?.id) return undefined;
     const title = String(selected.title || selected.firstMessage || '').replace(/\s+/g, ' ').trim();
+    const titleChars = Array.from(title);
     return {
       cliSessionId: selected.id,
-      ...(title ? { title: title.length > 80 ? `${title.slice(0, 79)}…` : title } : {}),
+      ...(title ? { title: titleChars.length > 80 ? `${titleChars.slice(0, 79).join('')}…` : title } : {}),
     };
   }) ?? undefined;
 }
