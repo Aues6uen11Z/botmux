@@ -79,6 +79,11 @@ describe('command schema ↔ /help 文案', () => {
       }
     }
   });
+  it('/adopt 帮助同时覆盖通用目标与实验性 Orca 直连', () => {
+    expect(commandSpec('/adopt')?.help).toEqual(['help.adopt', 'help.adopt_pane', 'help.adopt_orca']);
+    expect(zh['help.adopt_orca']).toContain('实验性');
+    expect(en['help.adopt_orca']).toContain('experimental');
+  });
   it('/help 组装用到的 help.* 键都能在 schema 里找到归属（或属于非命令的节标题/透传/元命令）', () => {
     const src = readFileSync(join(repoRoot, 'src/core/command-handler.ts'), 'utf-8');
     const helpStart = src.indexOf("case '/help': {");

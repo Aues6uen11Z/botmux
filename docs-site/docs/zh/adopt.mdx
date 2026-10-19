@@ -14,6 +14,8 @@
 
 选择卡片中 tmux、Zellij、Herdr 的粗体标题显示工作区名，「位置」显示各自的 session/pane 标识；Orca 的粗体标题直接显示终端或 CLI 会话标题，避免与下方工作路径重复。接入后列表与恢复日志保留接入时的 Orca 标题快照；之后改名不会影响 handle 身份校验。Orca 内部 handle 只用于点击确认和恢复校验，不展示给用户。
 
+> **Orca（实验性）**：目前覆盖 Orca server 与同机 SSH relay；跨主机 relay 仍依赖桌面客户端在线。兼容性受 Orca/relay 版本、终端重绘和各 CLI transcript 格式影响，升级后若发现会话发现、画面或正式回复异常，请重新接入并反馈版本信息。
+
 Orca 支持 server 模式（Linux 上常驻的 orcad，CLI 位于 `~/.orca/cli/bin/orca`）和 SSH relay 模式。Botmux 与 SSH 终端在同一台 Linux 主机上时，会直接连接持有原 PTY 的本机 relay，并优先使用这条独立于桌面客户端的路由：关闭 Mac 后仍可新发 `/adopt` 接入原会话，发现、校验和输入都不需要桌面端在线。跨主机的 SSH relay 仍通过桌面 CLI 路由，需要桌面端保持连接。接入前会校验终端 handle、PTY incarnation、工作区和本机进程归属；旧版 relay 缺少 incarnation 时不开放直连。以前已接入且保存为桌面 relay 路由的会话，需要重新接入一次才能使用本机直连。
 
 Web Terminal 保持文本屏幕快照：可以查看并输入，但不保留原终端的颜色、精确光标和鼠标模式。本机 relay 在桌面断开后从保留的输出重建屏幕；输出从一次重绘中途开始时，画面可能不完整。正式回复依靠精确绑定的 CLI 进程与 transcript，Trae、Claude Code 和 Codex 还会用 transcript 重建可滚动的用户/助手历史。

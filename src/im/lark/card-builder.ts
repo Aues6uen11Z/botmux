@@ -2799,6 +2799,8 @@ export interface AdoptPickerEntry {
    *  Deterministic so a re-render (which re-discovers) reproduces the same key. */
   key: string;
   kind: AdoptEntryKind;
+  /** Live backend shown in the source field. Resume rows have no live backend. */
+  liveBackend?: 'tmux' | 'Zellij' | 'Herdr' | 'Orca';
   cliId?: CliId;
   cliDisplayName?: string;
   /** resume: the CLI's native title when the transcript has one, else the
@@ -2872,6 +2874,9 @@ export function buildAdoptEntries(
     return {
       key: adoptLiveKey(s),
       kind: 'live' as const,
+      liveBackend: isOrcaAdoptCandidate(s)
+        ? 'Orca'
+        : zellij ? 'Zellij' : s.source === 'herdr' ? 'Herdr' : 'tmux',
       cliId: s.cliId,
       ...(customName && s.cliId === resumeCliId ? { cliDisplayName: customName } : {}),
       title,
@@ -3024,7 +3029,9 @@ export function buildAdoptSelectCard(
   visible.forEach((e) => {
     const isSelected = e.key === selectedKey;
     const kindTag = e.kind === 'live'
-      ? t('card.adopt.kind_live', undefined, locale)
+      ? `${t('card.adopt.kind_live', undefined, locale)} · ${e.liveBackend}${e.liveBackend === 'Orca'
+        ? t('card.adopt.orca_experimental_suffix', undefined, locale)
+        : ''}`
       : t('card.adopt.kind_resume', undefined, locale);
     const cliName = e.cliDisplayName ?? (e.cliId ? getCliDisplayName(e.cliId) : '—');
     const timeLabel = e.kind === 'live'

@@ -118,6 +118,7 @@ describe('buildAdoptSelectCard (V2 picker)', () => {
     const texts = cardTexts(card);
     expect(texts.length).toBe(1);
     expect(texts[0]).toContain('Pi');          // CLI name
+    expect(texts[0]).toContain('Source: 🟢 Running · Herdr');
     expect(texts[0]).toContain('collie:w3:p1'); // live target label
     expect(texts[0]).not.toContain('Session ID:');
   });
@@ -141,6 +142,7 @@ describe('buildAdoptSelectCard (V2 picker)', () => {
     }], 'om_root', 'zh'));
     const [text] = cardTexts(card);
     expect(text).toContain('**修复登录问题**');
+    expect(text).toContain('来源: 🟢 运行中 · Orca（实验性）');
     expect(text).not.toContain('位置:');
     expect(text).not.toContain('term_ea5b26db');
     const container = card.body.elements.find((e: any) => e.tag === 'interactive_container');
@@ -190,6 +192,7 @@ describe('buildAdoptSelectCard (V2 picker)', () => {
     ));
     const texts = cardTexts(card);
     expect(texts.length).toBe(1);
+    expect(texts[0]).toContain('Source: 🕘 History');
     expect(texts[0]).not.toContain('codex-rollout-abc123');
     // The selectable container carries a resume: entry_key.
     const container = card.body.elements.find((e: any) => e.tag === 'interactive_container');
@@ -346,8 +349,8 @@ describe('buildAdoptSelectCard (V2 picker)', () => {
     };
     const texts = cardTexts(parse(buildAdoptSelectCard([tmux, zellij as any], 'om_root', 'en')));
     expect(texts).toEqual([
-      ['**alpha**', 'Source: 🟢 Running', 'CLI: Codex', 'Path: `/work/alpha`', 'Location: `dev:0.0`', 'Uptime: unknown'].join('\n'),
-      ['**beta**', 'Source: 🟢 Running', 'CLI: Codex', 'Path: `/work/beta`', 'Location: `mywork/terminal_1`', 'Uptime: unknown'].join('\n'),
+      ['**alpha**', 'Source: 🟢 Running · tmux', 'CLI: Codex', 'Path: `/work/alpha`', 'Location: `dev:0.0`', 'Uptime: unknown'].join('\n'),
+      ['**beta**', 'Source: 🟢 Running · Zellij', 'CLI: Codex', 'Path: `/work/beta`', 'Location: `mywork/terminal_1`', 'Uptime: unknown'].join('\n'),
     ]);
   });
 });

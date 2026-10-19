@@ -6167,6 +6167,7 @@ export async function handleCommand(
           t('help.heading_adopt', undefined, loc),
           t('help.adopt', undefined, loc),
           t('help.adopt_pane', undefined, loc),
+          t('help.adopt_orca', undefined, loc),
           t('help.resume', { cliName }, loc),
           t('help.detach', undefined, loc),
           '',
