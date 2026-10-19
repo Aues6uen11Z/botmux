@@ -10,7 +10,7 @@ import {
 import { scanLocalOrcaCliPids } from '../services/orca-processes.js';
 import { findCodexRolloutByPid } from '../services/codex-transcript.js';
 import { findCocoSessionByPid } from '../services/coco-transcript.js';
-import { findTraexRolloutByPid } from '../services/traex-transcript.js';
+import { findTraexRolloutByPid, findTraexThreadByPid } from '../services/traex-transcript.js';
 import { readClaudeSessionMeta } from '../services/claude-transcript.js';
 import { queryOrcaRelayPtyMetadata } from '../services/orca-relay.js';
 import { queryOrcaDaemonSessions, type OrcaDaemonSessionMetadata } from '../services/orca-daemon.js';
@@ -45,13 +45,20 @@ export interface OrcaAdoptableSession {
 }
 
 
-function sessionIdForCliPid(cliId: CliId, pid: number | undefined): string | undefined {
-  if (!pid) return undefined;
-  if (cliId === 'claude-code') return readClaudeSessionMeta(pid)?.sessionId;
-  if (cliId === 'traex') return findTraexRolloutByPid(pid)?.cliSessionId;
-  if (cliId === 'codex') return findCodexRolloutByPid(pid)?.cliSessionId;
-  if (cliId === 'coco') return findCocoSessionByPid(pid)?.sessionId;
-  return undefined;
+function sessionMetaForCliPid(
+  cliId: CliId,
+  pid: number | undefined,
+): { sessionId?: string; title?: string } {
+  if (!pid) return {};
+  if (cliId === 'claude-code') return { sessionId: readClaudeSessionMeta(pid)?.sessionId };
+  if (cliId === 'traex') {
+    const rollout = findTraexRolloutByPid(pid);
+    const thread = findTraexThreadByPid(pid);
+    return { sessionId: rollout?.cliSessionId ?? thread?.cliSessionId, title: thread?.title };
+  }
+  if (cliId === 'codex') return { sessionId: findCodexRolloutByPid(pid)?.cliSessionId };
+  if (cliId === 'coco') return { sessionId: findCocoSessionByPid(pid)?.sessionId };
+  return {};
 }
 
 interface TerminalListResult {
@@ -103,6 +110,7 @@ function toCandidate(
   if (!hasStableOrcaTerminalIdentity(terminal)) return undefined;
   const local = localPids.get(terminal.handle);
   const cliPid = local?.cliId === cliId ? local.pid : undefined;
+  const session = sessionMetaForCliPid(cliId, cliPid);
   const size = sizes.get(terminal.handle);
   return {
     source: 'orca',
@@ -113,10 +121,10 @@ function toCandidate(
     orcaExecutionHostId: terminal.executionHostId,
     orcaWorktreeId: terminal.worktreeId,
     orcaAgentIdentity: terminal.agentIdentity!,
-    orcaTerminalTitle: terminal.title?.trim() || undefined,
+    orcaTerminalTitle: session.title || terminal.title?.trim() || undefined,
     cliId,
     cliPid,
-    sessionId: sessionIdForCliPid(cliId, cliPid),
+    sessionId: session.sessionId,
     cwd: terminal.worktreePath,
     startedAt: undefined,
     // Without an attested geometry (relay socket or terminal daemon) the

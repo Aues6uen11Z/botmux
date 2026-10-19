@@ -8,6 +8,8 @@ const state = vi.hoisted(() => ({
   readdir: vi.fn(() => [] as string[]),
   readFile: vi.fn(),
   readlink: vi.fn(),
+  traexRollout: vi.fn(),
+  traexThread: vi.fn(),
 }));
 
 vi.mock('../src/services/orca-cli.js', async (importOriginal) => ({
@@ -22,6 +24,12 @@ vi.mock('../src/services/orca-relay.js', () => ({
 
 vi.mock('../src/services/orca-daemon.js', () => ({
   queryOrcaDaemonSessions: state.daemon,
+}));
+
+vi.mock('../src/services/traex-transcript.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../src/services/traex-transcript.js')>(),
+  findTraexRolloutByPid: state.traexRollout,
+  findTraexThreadByPid: state.traexThread,
 }));
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -83,6 +91,8 @@ describe('Orca adopt discovery', () => {
     state.readdir.mockReturnValue([]);
     state.readFile.mockReset();
     state.readlink.mockReset();
+    state.traexRollout.mockReset();
+    state.traexThread.mockReset();
   });
 
   it('maps Orca TRAE identity to the Botmux traex adapter', () => {
@@ -145,17 +155,38 @@ describe('Orca adopt discovery', () => {
       throw new Error(`unexpected read ${path}`);
     });
     state.readlink.mockReturnValue('/usr/bin/traecli');
+    state.traexThread.mockReturnValue({ cliSessionId: 'thread_1', title: '修复登录流程' });
 
     const [candidate] = await discoverAdoptableOrcaSessions('traex');
     expect(candidate).toMatchObject({
       orcaInstance: 'server',
       orcaPtyId: 'serve-3687641d',
       cliPid: 101,
+      sessionId: 'thread_1',
+      orcaTerminalTitle: '修复登录流程',
       paneCols: 120,
       paneRows: 40,
       paneSizeVerified: true,
     });
     expect(state.roots).not.toHaveBeenCalled();
+  });
+
+  it('uses the owned TRAE thread title when Orca has no terminal title', async () => {
+    mockOrcaLists({ server: { ok: true, value: { terminals: [{ ...serverTerminal, title: null }] } } });
+    state.daemon.mockResolvedValue(new Map([['term_1', { pid: 100, cols: 120, rows: 40 }]]));
+    state.readdir.mockReturnValue(['100', '101']);
+    state.readFile.mockImplementation((path: string, encoding?: string) => {
+      if (path.endsWith('/status')) return `Name:\tt\nPPid:\t${path.includes('/101/') ? 100 : 1}\n`;
+      if (path.endsWith('/environ')) return Buffer.from(path.includes('/101/') ? 'ORCA_TERMINAL_HANDLE=term_1\0' : '');
+      if (path.endsWith('/comm')) return encoding ? 'traecli\n' : Buffer.from('traecli\n');
+      throw new Error(`unexpected read ${path}`);
+    });
+    state.readlink.mockReturnValue('/usr/bin/traecli');
+    state.traexThread.mockReturnValue({ cliSessionId: 'thread_1', title: '修复登录流程' });
+
+    expect(await discoverAdoptableOrcaSessions('traex')).toMatchObject([{
+      sessionId: 'thread_1', orcaTerminalTitle: '修复登录流程',
+    }]);
   });
 
   it('merges relay and server instances and tags each candidate with its instance', async () => {

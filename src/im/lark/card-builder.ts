@@ -372,6 +372,11 @@ function escapeMd(s: string): string {
   return s.replace(/[*_~`\[\]\\<>]/g, c => `\\${c}`);
 }
 
+/** Inline code is literal: markdown escaping would surface visible backslashes. */
+function inlineCode(s: string): string {
+  return `\`${s.replace(/[`\r\n]+/g, '')}\``;
+}
+
 /** Sanitize a user-derived string for a `plain_text` HEADER title. Unlike
  *  {@link escapeMd} (for `lark_md` bodies), a plain_text field renders literally
  *  — so markdown-escaping would surface visible backslashes, and a raw
@@ -2797,10 +2802,8 @@ export interface AdoptPickerEntry {
   cliId?: CliId;
   cliDisplayName?: string;
   /** resume: the CLI's native title when the transcript has one, else the
-   *  first real user prompt (see ResumableSession.title); live: backend
-   *  display name (herdr pane label / Claude terminal title, see
-   *  AdoptableSession.title), else project (cwd basename). zellij always uses
-   *  project. */
+   *  first real user prompt; live: backend display name, Orca session title,
+   *  or project (cwd basename). Zellij always uses project. */
   title: string;
   /** cwd basename, shown compactly. */
   project: string;
@@ -2857,9 +2860,13 @@ export function buildAdoptEntries(
 ): AdoptPickerEntry[] {
   const customName = runtimeDisplayName?.trim();
   const live: AdoptPickerEntry[] = sessions.map((s) => {
+    const zellij = 'zellijPaneId' in s;
     const project = s.cwd.split('/').pop() || s.cwd;
+    const title = isOrcaAdoptCandidate(s)
+      ? s.orcaTerminalTitle || project
+      : (!zellij && s.title) || project;
     let target: string | undefined;
-    if (isOrcaAdoptCandidate(s)) target = s.orcaTerminalTitle;
+    if (isOrcaAdoptCandidate(s)) target = undefined;
     else if ('zellijPaneId' in s) target = `${s.zellijSession}/${s.zellijPaneId}`;
     else target = adoptTargetLabel(s);
     return {
@@ -2867,7 +2874,7 @@ export function buildAdoptEntries(
       kind: 'live' as const,
       cliId: s.cliId,
       ...(customName && s.cliId === resumeCliId ? { cliDisplayName: customName } : {}),
-      title: (!zellij && s.title) || project,
+      title,
       project,
       cwd: s.cwd,
       sessionId: s.sessionId,
@@ -3033,10 +3040,10 @@ export function buildAdoptSelectCard(
       titleLine,
       `${labelKind}: ${kindTag}`,
       `${labelCli}: ${escapeMd(cliName)}`,
-      `${labelDir}: \`${escapeMd(e.cwd)}\``,
+      `${labelDir}: ${inlineCode(e.cwd)}`,
     ];
     if (e.kind === 'resume' && e.candidateNumber) lines.push(`${labelCandidate}: #${e.candidateNumber}`);
-    if (e.kind === 'live' && e.target) lines.push(`${labelTarget}: \`${escapeMd(e.target)}\``);
+    if (e.kind === 'live' && e.target) lines.push(`${labelTarget}: ${inlineCode(e.target)}`);
     lines.push(`${timeLabel}: ${timeVal}`);
     elements.push({
       tag: 'interactive_container',
