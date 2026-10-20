@@ -3030,10 +3030,12 @@ export function buildAdoptSelectCard(
   // ─── Session cards (current page) ───────────────────────────────────
   visible.forEach((e) => {
     const isSelected = e.key === selectedKey;
+    // 既有后端（tmux/Zellij/Herdr）的「来源」行保持原样，避免改变老用户卡片形态；
+    // 仅 Orca 作为实验能力追加后端名与实验性标记（后端身份仍可从「位置」行看出）。
     const kindTag = e.kind === 'live'
-      ? `${t('card.adopt.kind_live', undefined, locale)} · ${e.liveBackend}${e.liveBackend === 'Orca'
-        ? t('card.adopt.orca_experimental_suffix', undefined, locale)
-        : ''}`
+      ? (e.liveBackend === 'Orca'
+        ? `${t('card.adopt.kind_live', undefined, locale)} · Orca${t('card.adopt.orca_experimental_suffix', undefined, locale)}`
+        : t('card.adopt.kind_live', undefined, locale))
       : t('card.adopt.kind_resume', undefined, locale);
     const cliName = e.cliDisplayName ?? (e.cliId ? getCliDisplayName(e.cliId) : '—');
     const timeLabel = e.kind === 'live'

@@ -119,7 +119,7 @@ describe('buildAdoptSelectCard (V2 picker)', () => {
     const texts = cardTexts(card);
     expect(texts.length).toBe(1);
     expect(texts[0]).toContain('Pi');          // CLI name
-    expect(texts[0]).toContain('Source: 🟢 Running · Herdr');
+    expect(texts[0]).toContain('Source: 🟢 Running');
     expect(texts[0]).toContain('collie:w3:p1'); // live target label
     expect(texts[0]).not.toContain('Session ID:');
   });
@@ -368,8 +368,8 @@ describe('buildAdoptSelectCard (V2 picker)', () => {
     };
     const texts = cardTexts(parse(buildAdoptSelectCard([tmux, zellij], 'om_root', 'en')));
     expect(texts).toEqual([
-      ['**alpha**', 'Source: 🟢 Running · tmux', 'CLI: Codex', 'Path: `/work/alpha`', 'Location: `dev:0.0`', 'Uptime: unknown'].join('\n'),
-      ['**beta**', 'Source: 🟢 Running · Zellij', 'CLI: Codex', 'Path: `/work/beta`', 'Location: `mywork/terminal_1`', 'Uptime: unknown'].join('\n'),
+      ['**alpha**', 'Source: 🟢 Running', 'CLI: Codex', 'Path: `/work/alpha`', 'Location: `dev:0.0`', 'Uptime: unknown'].join('\n'),
+      ['**beta**', 'Source: 🟢 Running', 'CLI: Codex', 'Path: `/work/beta`', 'Location: `mywork/terminal_1`', 'Uptime: unknown'].join('\n'),
     ]);
   });
 
