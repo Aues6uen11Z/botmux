@@ -2804,8 +2804,10 @@ export interface AdoptPickerEntry {
   cliId?: CliId;
   cliDisplayName?: string;
   /** resume: the CLI's native title when the transcript has one, else the
-   *  first real user prompt; live: backend display name, Orca session title,
-   *  or project (cwd basename). Zellij always uses project. */
+   *  first real user prompt (see ResumableSession.title); live: backend /
+   *  CLI display name (herdr pane label / Claude terminal title / TraeX native
+   *  title, see AdoptableSession.title and ZellijAdoptableSession.title) or the
+   *  Orca terminal title, else project (cwd basename). */
   title: string;
   /** cwd basename, shown compactly. */
   project: string;
@@ -2866,7 +2868,7 @@ export function buildAdoptEntries(
     const project = s.cwd.split('/').pop() || s.cwd;
     const title = isOrcaAdoptCandidate(s)
       ? s.orcaTerminalTitle || project
-      : (!zellij && s.title) || project;
+      : s.title || project;
     let target: string | undefined;
     if (isOrcaAdoptCandidate(s)) target = undefined;
     else if ('zellijPaneId' in s) target = `${s.zellijSession}/${s.zellijPaneId}`;
